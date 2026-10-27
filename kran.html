@@ -1,0 +1,227 @@
+<title>Кран</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Russo+One&display=swap">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+/* Layout: one full-screen canvas; HUD pinned top, start/over panel centered */
+:root{
+  --sky:#e9eef2; --ink:#1f2a33; --muted:#6a7884; --accent:#f08a24; --panel:#ffffffee; --line:#c9d3db; --gold:#e0a400;
+  --display:"Russo One","Arial Black",system-ui,sans-serif;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--sky:#141b22;--ink:#e7edf2;--muted:#8d9aa6;--accent:#ff9a3c;--panel:#1d262fee;--line:#33414d;--gold:#ffc83a;color-scheme:dark}}
+:root[data-theme="dark"]{--sky:#141b22;--ink:#e7edf2;--muted:#8d9aa6;--accent:#ff9a3c;--panel:#1d262fee;--line:#33414d;--gold:#ffc83a;color-scheme:dark}
+html,body{height:100%}
+body{margin:0;background:var(--sky);color:var(--ink);font-family:var(--display);overflow:hidden;touch-action:manipulation;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent}
+canvas{position:fixed;inset:0;width:100%;height:100%;display:block}
+.hud{position:fixed;top:calc(env(safe-area-inset-top,0px) + 14px);left:0;right:0;display:flex;justify-content:space-between;align-items:flex-start;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));pointer-events:none}
+.floor{font-size:44px;line-height:1}
+.floor small{display:block;font-size:12px;letter-spacing:.12em;color:var(--muted);margin-top:4px}
+.best{font-size:13px;letter-spacing:.08em;color:var(--muted);text-align:right}
+.best b{display:block;font-size:22px;color:var(--ink);font-weight:400}
+.combo{position:fixed;left:50%;top:30%;transform:translate(-50%,-50%);font-size:26px;color:var(--accent);opacity:0;transition:opacity .2s,transform .5s;pointer-events:none;white-space:nowrap}
+.combo.on{opacity:1;transform:translate(-50%,-80%)}
+.panel{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:min(340px,calc(100% - 32px));background:var(--panel);border:1px solid var(--line);border-radius:20px;
+  padding:24px 20px;text-align:center;display:flex;flex-direction:column;gap:10px;backdrop-filter:blur(6px)}
+.panel h1{margin:0;font-size:40px;font-weight:400;letter-spacing:.02em}
+.panel p{margin:0;font-family:system-ui,sans-serif;font-size:15px;line-height:1.45;color:var(--muted)}
+.panel .res{font-size:56px;line-height:1;color:var(--accent)}
+.chance{display:flex;flex-direction:column;gap:8px;padding-top:6px;border-top:1px solid var(--line)}
+.chance p{font-size:13px}
+.btn{font:400 17px var(--display);border:0;border-radius:14px;padding:13px 16px;background:var(--accent);color:#1a1006;cursor:pointer}
+.btn.sec{background:transparent;color:var(--ink);border:1px solid var(--line);font-size:15px}
+.btn.star{background:transparent;color:var(--ink);border:2px solid var(--gold)}
+.btn:disabled{opacity:.5;cursor:default}
+.btn:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+.msg{min-height:1em;font-size:13px!important}
+</style>
+
+<canvas id="c"></canvas>
+<div class="hud"><div class="floor"><span id="score">0</span><small>ЭТАЖ</small></div><div class="best">РЕКОРД<b id="best">0</b></div></div>
+<div class="combo" id="combo">Точно в отметку!</div>
+
+<div class="panel" id="start">
+  <h1>Кран</h1>
+  <p>Блок качается на тросе. Коснитесь экрана, чтобы опустить его. Что выступает за край этажа, срезается. Попадание точно в отметку сохраняет ширину блока.</p>
+  <button class="btn" id="go" type="button">Начать стройку</button>
+</div>
+<div class="panel" id="over" hidden>
+  <p>Стройка остановлена на этаже</p>
+  <div class="res" id="final">0</div>
+  <p id="verdict"></p>
+  <div class="chance" id="chance" hidden>
+    <p>Второй шанс: продолжить с этого этажа, один раз за игру</p>
+    <button class="btn sec" id="chanceAd" type="button" hidden>Посмотреть рекламу</button>
+    <button class="btn star" id="chanceStar" type="button" hidden>Продолжить за ⭐ 5</button>
+    <p class="msg" id="chanceMsg"></p>
+  </div>
+  <button class="btn" id="again" type="button">Строить заново</button>
+  <button class="btn sec" id="share" type="button" hidden>Поделиться результатом</button>
+</div>
+
+<script>
+/* ===== Монетизация: заполните перед публикацией ===== */
+const CONFIG={
+  // Адрес сервера бота (bot.py), который выставляет счёт в Звёздах. Пусто — кнопка оплаты скрыта.
+  INVOICE_API:"",                 // пример: "https://kran-bot.example.ru/invoice"
+  STAR_PRICE:5,                   // цена второго шанса, Звёзд (должна совпадать с bot.py)
+  // Рекламная сеть для мини-приложений. Пусто — кнопка рекламы скрыта.
+  AD_BLOCK_ID:"",                 // идентификатор рекламного блока из кабинета сети
+};
+// Показ рекламы с вознаграждением. Возвращает Promise<boolean>: true — ролик досмотрен.
+// Подключите скрипт сети в <head> и замените тело функции по её документации.
+async function showRewardedAd(){
+  if(window.Adsgram&&CONFIG.AD_BLOCK_ID){
+    const r=await window.Adsgram.init({blockId:CONFIG.AD_BLOCK_ID}).show();
+    return !!(r&&r.done);
+  }
+  return false;
+}
+/* ==================================================== */
+
+const tg=window.Telegram&&window.Telegram.WebApp&&window.Telegram.WebApp.initData?window.Telegram.WebApp:null;
+if(tg){try{tg.ready();tg.expand();if(tg.colorScheme)document.documentElement.dataset.theme=tg.colorScheme;tg.disableVerticalSwipes&&tg.disableVerticalSwipes();}catch(e){}}
+const haptic=t=>{try{tg&&tg.HapticFeedback&&(t==="err"?tg.HapticFeedback.notificationOccurred("error"):tg.HapticFeedback.impactOccurred(t))}catch(e){}};
+const $=id=>document.getElementById(id);
+
+const cv=$("c"),cx=cv.getContext("2d");
+let W,H;
+function resize(){const d=Math.min(2,window.devicePixelRatio||1);W=innerWidth;H=innerHeight;cv.width=W*d;cv.height=H*d;cx.setTransform(d,0,0,d,0,0);}
+addEventListener("resize",resize);resize();
+const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+const BH=34, GROUND=120;
+const shades=["#9aa6b0","#b4bdc4","#8c99a4","#c3a98a","#a9b4bd"];
+let tower,cur,falling,camY=0,camT=0,score=0,best=0,state="menu",pieces=[],combo=0,usedChance=false,hookScreenY=150;
+try{best=+localStorage.getItem("kran_best")||0}catch(e){}
+$("best").textContent=best;
+
+const baseW=()=>Math.min(220,W*0.5);
+const topY=i=>H-GROUND-(i+1)*BH;              // world y of block i
+const hookWorldY=()=>hookScreenY-camY;
+
+function reset(){
+  tower=[{x:W/2-baseW()/2,w:baseW(),c:"#6b7782"}];
+  score=0;combo=0;camY=camT=0;pieces=[];falling=null;usedChance=false;
+  $("score").textContent=0;spawn();
+}
+function spawn(){
+  const last=tower[tower.length-1];
+  cur={w:last.w,phase:Math.random()*6,speed:1.6+Math.min(score,40)*0.045,amp:Math.min(W*0.42,W/2-10),c:shades[score%shades.length]};
+}
+const curX=t=>W/2+Math.sin(t*cur.speed+cur.phase)*cur.amp-cur.w/2;
+
+function drop(){
+  if(state!=="play"||falling)return;
+  falling={x:curX(performance.now()/1000),w:cur.w,y:hookWorldY(),vy:0,c:cur.c};
+  haptic("light");
+}
+function land(){
+  const last=tower[tower.length-1],f=falling;falling=null;
+  const L=Math.max(f.x,last.x),R=Math.min(f.x+f.w,last.x+last.w),y=topY(tower.length);
+  if(R-L<=0){pieces.push({x:f.x,y,w:f.w,c:f.c,vy:0,vx:(f.x<last.x?-1.5:1.5),r:0});return gameOver();}
+  let nx=L,nw=R-L;
+  if(Math.abs(f.x-last.x)<5){
+    nx=last.x;nw=last.w;combo++;flashCombo();haptic("medium");
+    if(combo>=3&&nw<baseW()){nw=Math.min(nw+10,baseW());nx=last.x-5;}
+  }else{
+    combo=0;haptic("light");
+    if(f.x<L)pieces.push({x:f.x,y,w:L-f.x,c:f.c,vy:0,vx:-1.2,r:0});
+    if(f.x+f.w>R)pieces.push({x:R,y,w:f.x+f.w-R,c:f.c,vy:0,vx:1.2,r:0});
+  }
+  tower.push({x:nx,w:nw,c:f.c});score++;$("score").textContent=score;
+  camT=Math.max(0,hookScreenY+150-topY(tower.length));
+  spawn();
+}
+function flashCombo(){const el=$("combo");el.textContent=combo>1?`Точно в отметку ×${combo}`:"Точно в отметку!";el.classList.remove("on");void el.offsetWidth;el.classList.add("on");clearTimeout(flashCombo.t);flashCombo.t=setTimeout(()=>el.classList.remove("on"),700);}
+
+function verdict(n){if(n<5)return"Фундамент залит. Можно лучше.";if(n<12)return"Малоэтажная застройка. Неплохо.";if(n<25)return"Жилой комплекс сдан в срок.";if(n<40)return"Высотка. Прораб доволен.";return"Небоскрёб. Вас зовут на объект.";}
+const adOn=()=>!!CONFIG.AD_BLOCK_ID;
+const starOn=()=>!!(tg&&CONFIG.INVOICE_API&&tg.openInvoice);
+function gameOver(){
+  state="over";haptic("err");
+  if(score>best){best=score;try{localStorage.setItem("kran_best",best)}catch(e){}$("best").textContent=best;}
+  setTimeout(()=>{
+    $("final").textContent=score;$("verdict").textContent=verdict(score);
+    const can=!usedChance&&score>0&&(adOn()||starOn());
+    $("chance").hidden=!can;$("chanceAd").hidden=!adOn();$("chanceStar").hidden=!starOn();
+    $("chanceStar").textContent=`Продолжить за ⭐ ${CONFIG.STAR_PRICE}`;
+    $("chanceMsg").textContent="";$("chanceAd").disabled=$("chanceStar").disabled=false;
+    $("over").hidden=false;
+  },600);
+}
+function resume(){
+  usedChance=true;pieces=[];combo=0;$("over").hidden=true;spawn();state="play";
+}
+
+async function chanceByAd(){
+  $("chanceAd").disabled=true;$("chanceMsg").textContent="Загружаем ролик…";
+  try{ if(await showRewardedAd()) return resume(); $("chanceMsg").textContent="Ролик не досмотрен. Второй шанс не начислен."; }
+  catch(e){ $("chanceMsg").textContent="Реклама сейчас недоступна. Попробуйте позже."; }
+  $("chanceAd").disabled=false;
+}
+async function chanceByStars(){
+  $("chanceStar").disabled=true;$("chanceMsg").textContent="Готовим счёт…";
+  try{
+    const r=await fetch(CONFIG.INVOICE_API,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({initData:tg.initData,item:"second_chance"})});
+    if(!r.ok)throw new Error(r.status);
+    const {link}=await r.json();
+    tg.openInvoice(link,status=>{
+      if(status==="paid")return resume();
+      $("chanceMsg").textContent=status==="cancelled"?"Оплата отменена.":"Оплата не прошла. Попробуйте ещё раз.";
+      $("chanceStar").disabled=false;
+    });
+    $("chanceMsg").textContent="";
+  }catch(e){$("chanceMsg").textContent="Не удалось выставить счёт. Проверьте соединение.";$("chanceStar").disabled=false;}
+}
+
+function block(x,y,w,c){
+  cx.fillStyle=c;cx.fillRect(x,y,w,BH-2);
+  cx.fillStyle="rgba(0,0,0,.14)";cx.fillRect(x,y+BH-8,w,6);
+  cx.fillStyle="rgba(255,255,255,.35)";
+  const n=Math.floor((w-10)/22);for(let k=0;k<n;k++)cx.fillRect(x+8+k*22,y+8,12,12);
+}
+function draw(now){
+  const t=now/1000;
+  camY+=(camT-camY)*0.12;
+  const ink=css("--ink"),muted=css("--muted"),accent=css("--accent"),line=css("--line");
+  cx.fillStyle=css("--sky");cx.fillRect(0,0,W,H);
+  hookScreenY=Math.min(H*0.32,170);
+  cx.save();cx.translate(0,camY);
+  cx.fillStyle=line;cx.fillRect(0,H-GROUND,W,GROUND+camY+40);
+  if(tower)tower.forEach((b,i)=>block(b.x,topY(i),b.w,b.c));
+  cx.fillStyle=muted;cx.font="11px system-ui";cx.textAlign="left";
+  if(tower)for(let i=5;i<tower.length;i+=5){const y=topY(i)+BH/2+4;cx.fillText(i,8,y);cx.fillRect(26,y-4,10,1);}
+  if(falling){falling.vy+=0.9;falling.y+=falling.vy;const tg_=topY(tower.length);if(falling.y>=tg_){falling.y=tg_;block(falling.x,falling.y,falling.w,falling.c);land();}else block(falling.x,falling.y,falling.w,falling.c);}
+  pieces=pieces.filter(p=>p.y<H-camY+200);
+  pieces.forEach(p=>{p.vy+=0.6;p.y+=p.vy;p.x+=p.vx;p.r+=p.vx*0.02;cx.save();cx.translate(p.x+p.w/2,p.y+BH/2);cx.rotate(p.r);cx.globalAlpha=.8;block(-p.w/2,-BH/2,p.w,p.c);cx.restore();});
+  cx.restore();
+  // crane jib and hook
+  const hy=hookScreenY, jy=hy-90;
+  let hx=W/2, hold=null;
+  if(state==="play"&&!falling){hx=curX(t)+cur.w/2;hold=[curX(t),cur.w,cur.c];}
+  else if(state==="menu"){const w=baseW(),x=W/2-w/2+Math.sin(t*1.4)*W*0.3;hx=x+w/2;hold=[x,w,shades[0]];}
+  else if(falling){hx=falling.x+falling.w/2;}
+  cx.strokeStyle=ink;cx.lineWidth=3;cx.beginPath();cx.moveTo(0,jy);cx.lineTo(W,jy);cx.stroke();
+  cx.lineWidth=1;cx.beginPath();for(let x=0;x<W;x+=18){cx.moveTo(x,jy);cx.lineTo(x+9,jy+10);cx.lineTo(x+18,jy);}cx.moveTo(0,jy+10);cx.lineTo(W,jy+10);cx.stroke();
+  cx.fillStyle=accent;cx.fillRect(hx-14,jy+4,28,10);
+  cx.strokeStyle=muted;cx.lineWidth=1.5;cx.beginPath();cx.moveTo(hx,jy+14);cx.lineTo(hx,hold?hy:hy-40);cx.stroke();
+  if(hold)block(hold[0],hy,hold[1],hold[2]);
+  requestAnimationFrame(draw);
+}
+
+function start(){$("start").hidden=true;$("over").hidden=true;reset();state="play";}
+$("go").addEventListener("click",e=>{e.stopPropagation();start();});
+$("again").addEventListener("click",e=>{e.stopPropagation();start();});
+$("chanceAd").addEventListener("click",e=>{e.stopPropagation();chanceByAd();});
+$("chanceStar").addEventListener("click",e=>{e.stopPropagation();chanceByStars();});
+if(tg)$("share").hidden=false;
+$("share").addEventListener("click",e=>{e.stopPropagation();
+  const txt=`Построил ${score} этажей в игре «Кран». Сможешь выше?`;
+  try{tg.openTelegramLink("https://t.me/share/url?url="+encodeURIComponent(location.href)+"&text="+encodeURIComponent(txt));}catch(err){}
+});
+addEventListener("pointerdown",e=>{if(e.target.closest(".panel"))return;drop();});
+addEventListener("keydown",e=>{if((e.code==="Space"||e.code==="Enter")&&state==="play"){e.preventDefault();drop();}});
+reset();state="menu";
+requestAnimationFrame(draw);
+</script>
